@@ -1,0 +1,105 @@
+name: Deploy to Azure
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY_LOGIN_SERVER: ${{ secrets.AZURE_REGISTRY_LOGIN_SERVER }}
+  REGISTRY_USERNAME: ${{ secrets.AZURE_REGISTRY_USERNAME }}
+  REGISTRY_PASSWORD: ${{ secrets.AZURE_REGISTRY_PASSWORD }}
+  RESOURCE_GROUP: competitive-gaming-rg
+  BACKEND_WEBAPP: competitive-gaming-backend
+  FRONTEND_WEBAPP: competitive-gaming-frontend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Build Backend Image
+      run: |
+        docker build -t backend:latest ./backend
+        docker tag backend:latest ${{ env.REGISTRY_LOGIN_SERVER }}/backend:latest
+        docker tag backend:latest ${{ env.REGISTRY_LOGIN_SERVER }}/backend:${{ github.sha }}
+    
+    - name: Build Frontend Image
+      run: |
+        docker build -t frontend:latest ./frontend
+        docker tag frontend:latest ${{ env.REGISTRY_LOGIN_SERVER }}/frontend:latest
+        docker tag frontend:latest ${{ env.REGISTRY_LOGIN_SERVER }}/frontend:${{ github.sha }}
+    
+    - name: Login to ACR
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ env.REGISTRY_LOGIN_SERVER }}
+        username: ${{ env.REGISTRY_USERNAME }}
+        password: ${{ env.REGISTRY_PASSWORD }}
+    
+    - name: Push Backend to ACR
+      run: |
+        docker push ${{ env.REGISTRY_LOGIN_SERVER }}/backend:latest
+        docker push ${{ env.REGISTRY_LOGIN_SERVER }}/backend:${{ github.sha }}
+    
+    - name: Push Frontend to ACR
+      run: |
+        docker push ${{ env.REGISTRY_LOGIN_SERVER }}/frontend:latest
+        docker push ${{ env.REGISTRY_LOGIN_SERVER }}/frontend:${{ github.sha }}
+  
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Deploy Backend
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.BACKEND_WEBAPP }}
+        images: ${{ env.REGISTRY_LOGIN_SERVER }}/backend:${{ github.sha }}
+    
+    - name: Deploy Frontend
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.FRONTEND_WEBAPP }}
+        images: ${{ env.REGISTRY_LOGIN_SERVER }}/frontend:${{ github.sha }}
+    
+    - name: Configure Backend
+      uses: azure/cli@v1
+      with:
+        azcliversion: latest
+        inlineScript: |
+          az webapp config appsettings set \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.BACKEND_WEBAPP }} \
+            --settings NODE_ENV=production \
+              DB_HOST=${{ secrets.DB_HOST }} \
+              DB_USER=${{ secrets.DB_USER }} \
+              DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
+              DB_NAME=competitive_gaming \
+              REDIS_HOST=${{ secrets.REDIS_HOST }} \
+              REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }} \
+              JWT_SECRET=${{ secrets.JWT_SECRET }} \
+              STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}
+    
+    - name: Configure Frontend
+      uses: azure/cli@v1
+      with:
+        azcliversion: latest
+        inlineScript: |
+          az webapp config appsettings set \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.FRONTEND_WEBAPP }} \
+            --settings REACT_APP_API_URL=${{ secrets.API_URL }}
+    
+    - name: Deployment Complete
+      run: |
+        echo "✅ Deployment successful!"
+        echo "Backend: https://${{ env.BACKEND_WEBAPP }}.azurewebsites.net"
+        echo "Frontend: https://${{ env.FRONTEND_WEBAPP }}.azurewebsites.net"
